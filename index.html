@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Car controller (Bluetooth LE)</title>
+<style>
+:root{--bg:#f6f7f8;--panel:#fff;--ink:#1b2430;--mute:#5b6675;--line:#d5dae1;--accent:#0d6e6e;--accent-ink:#fff;--stop:#b3261e}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#14181d;--panel:#1c2229;--ink:#e6eaef;--mute:#98a2b0;--line:#323b46;--accent:#3cc0b8;--accent-ink:#0b1a19;--stop:#f2776f}}
+*{box-sizing:border-box}
+body{margin:0;padding:20px;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,sans-serif;display:flex;justify-content:center}
+main{width:100%;max-width:520px;display:grid;gap:16px}
+h1{font-size:1.25rem;margin:0}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;display:grid;gap:10px}
+h2{font-size:1rem;margin:0}
+p{margin:0;color:var(--mute);font-size:.9rem}
+button,select,input{font:inherit;color:inherit}
+button{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:8px 14px;cursor:pointer}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+select,input{width:100%;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.pad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:320px;margin:0 auto;width:100%}
+.pad button{min-height:76px;font-size:1.1rem;touch-action:none;user-select:none}
+.pad .stop{color:var(--stop);border-color:var(--stop);font-weight:700}
+pre{margin:0;white-space:pre-wrap;word-break:break-all;font:.82rem/1.4 ui-monospace,Consolas,monospace;max-height:180px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px}
+#status{font-weight:600}
+</style>
+</head>
+<body>
+<main>
+  <h1>Car controller (Bluetooth LE)</h1>
+
+  <section>
+    <h2>Connect</h2>
+    <p>Use Chrome or Edge. Power the car, then press Connect and choose the HC-05 from the list.</p>
+    <label>Extra service ID if the module uses an unusual one (optional)
+      <input id="extra" placeholder="e.g. ffe0 or a full UUID" autocomplete="off">
+    </label>
+    <div class="row">
+      <button id="connect" class="primary">Connect</button>
+      <button id="disconnect">Disconnect</button>
+    </div>
+    <div id="status">Not connected</div>
+  </section>
+
+  <section>
+    <h2>What the module offers</h2>
+    <label>Characteristic to send commands to
+      <select id="chars"><option>Connect first</option></select>
+    </label>
+    <label><input type="checkbox" id="listen" style="width:auto"> Show replies from the car</label>
+    <pre id="found">Nothing yet.</pre>
+  </section>
+
+  <section>
+    <h2>Drive</h2>
+    <p>Hold a button to keep moving. Keys: arrows or WASD, space to stop.</p>
+    <div class="pad">
+      <span></span><button data-c="F">Forward</button><span></span>
+      <button data-c="L">Left</button><button class="stop" id="stop">Stop</button><button data-c="R">Right</button>
+      <span></span><button data-c="B">Back</button><span></span>
+    </div>
+    <div class="row">
+      <input id="raw" placeholder="Send any text" style="flex:1" autocomplete="off">
+      <button id="sendRaw">Send</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<script>
+const u=h=>'0000'+h+'-0000-1000-8000-00805f9b34fb';
+const OPT=['ffe0','ffe5','fff0','ffb0','ffc0','ffd0','ffa0','ff00','ae00','ab00','fee0','fee7'].map(u).concat([
+  '6e400001-b5a9-f393-e0a9-e50e24dcca9e','49535343-fe7d-4ae5-8fa9-9fafd205e455']);
+const $=id=>document.getElementById(id);
+let dev=null,target=null,chars=[],timer=null,t0=0,listening=null,manual=false;
+
+function log(t){const l=$('log');l.textContent+=t+'\n';l.scrollTop=l.scrollHeight}
+function status(t){$('status').textContent=t}
+
+async function listen(){
+  if(!$('listen').checked||!target||!target.properties.notify||listening===target)return;
+  try{
+    await target.startNotifications();listening=target;
+    target.addEventListener('characteristicvaluechanged',e=>log('Car says: '+new TextDecoder().decode(e.target.value).trim()));
+  }catch(e){log('Could not listen: '+e.message)}
+}
+
+async function onDrop(){
+  stop(false);target=null;listening=null;
+  if(manual){manual=false;status('Disconnected');return}
+  log('Link dropped after '+Math.round((Date.now()-t0)/1000)+' s');
+  for(let i=1;i<=3;i++){
+    try{
+      status('Reconnecting ('+i+'/3)...');
+      await new Promise(r=>setTimeout(r,1000));
+      const srv=await dev.gatt.connect();
+      const found=[];
+      for(const s of await srv.getPrimaryServices())for(const c of await s.getCharacteristics())found.push(c);
+      chars=found;target=chars[$('chars').value]||null;
+      if(!target)continue;
+      t0=Date.now();listen();status('Reconnected. Ready.');log('Reconnected');return;
+    }catch(e){log('Reconnect try '+i+' failed: '+e.message)}
+  }
+  status('Disconnected. Press Connect to try again.');
+}
+
+if(!navigator.bluetooth){status('This browser has no Web Bluetooth. Open the file in Chrome or Edge.')}
+
+function parseId(s){s=s.trim().toLowerCase();if(!s)return null;return /^[0-9a-f]{4}$/.test(s)?u(s):s}
+
+async function connect(){
+  try{
+    const opts=OPT.slice();const x=parseId($('extra').value);if(x!==null)opts.push(x);
+    dev=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:opts});
+    dev.addEventListener('gattserverdisconnected',onDrop);
+    status('Connecting to '+(dev.name||'device')+'...');
+    const srv=await dev.gatt.connect();
+    const services=await srv.getPrimaryServices();
+    chars=[];let report='';
+    for(const s of services){
+      report+='Service '+s.uuid+'\n';
+      for(const c of await s.getCharacteristics()){
+        const p=['read','write','writeWithoutResponse','notify','indicate'].filter(k=>c.properties[k]).join(', ');
+        report+='  Characteristic '+c.uuid+' ['+p+']\n';
+        chars.push(c);
+      }
+    }
+    $('found').textContent=report||'No known serial service found. Type the module\'s service ID in the box above and connect again.';
+    const sel=$('chars');sel.innerHTML='';
+    chars.forEach((c,i)=>{if(c.properties.write||c.properties.writeWithoutResponse){
+      const o=document.createElement('option');o.value=i;o.textContent=c.uuid;sel.appendChild(o)}});
+    if(sel.options.length){target=chars[sel.value];t0=Date.now();listen();status('Connected to '+(dev.name||'device')+'. Ready.')}
+    else status('Connected, but no writable characteristic was found.');
+  }catch(e){const m=(e&&e.name?e.name+': ':'')+((e&&e.message)||String(e));status('Could not connect: '+m);log('Connect error: '+m)}
+}
+
+async function send(t,quiet){
+  if(!target){if(!quiet)log('Not connected');return}
+  const data=new TextEncoder().encode(t);
+  try{
+    for(let i=0;i<data.length;i+=20){
+      const ch=data.slice(i,i+20);
+      if(target.properties.writeWithoutResponse)await target.writeValueWithoutResponse(ch);
+      else await target.writeValue(ch);
+    }
+    if(!quiet)log('Sent '+t);
+  }catch(e){log('Send failed: '+e.message)}
+}
+
+function start(c){stop(false);send(c);timer=setInterval(()=>send(c,true),250)}
+function stop(sendStop=true){if(timer){clearInterval(timer);timer=null;if(sendStop)send('S')}}
+
+$('connect').onclick=connect;
+$('disconnect').onclick=()=>{stop(false);if(dev&&dev.gatt.connected){manual=true;dev.gatt.disconnect()}};
+$('chars').onchange=e=>{target=chars[e.target.value];listen()};
+$('listen').onchange=listen;
+$('stop').onclick=()=>{stop(false);send('S')};
+$('sendRaw').onclick=()=>{const v=$('raw').value;if(v)send(v)};
+document.querySelectorAll('.pad [data-c]').forEach(b=>{
+  b.addEventListener('pointerdown',()=>start(b.dataset.c));
+  ['pointerup','pointerleave','pointercancel'].forEach(ev=>b.addEventListener(ev,()=>stop()));
+});
+
+const KEYS={ArrowUp:'F',w:'F',ArrowDown:'B',s:'B',ArrowLeft:'L',a:'L',ArrowRight:'R',d:'R'};
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT'||e.repeat)return;
+  if(e.key===' '){e.preventDefault();stop(false);send('S');return}
+  const c=KEYS[e.key];if(c){e.preventDefault();start(c)}
+});
+document.addEventListener('keyup',e=>{if(KEYS[e.key])stop()});
+</script>
+</body>
+</html>
